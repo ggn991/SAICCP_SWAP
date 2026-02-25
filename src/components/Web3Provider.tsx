@@ -71,7 +71,7 @@ export function Web3Provider({ children }: Web3ProviderProps) {
         <WagmiProvider config={config}>
             <QueryClientProvider client={queryClient}>
                 <ConnectKitProvider mode="dark">
-                    <WalletProvider adapters={adapters} autoConnect={true}>
+                    <WalletProvider adapters={adapters} autoConnect={false}>
                         <WalletModalProvider>
                             {children}
                         </WalletModalProvider>
