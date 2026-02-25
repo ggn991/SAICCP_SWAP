@@ -1,0 +1,647 @@
+import { useState, useEffect, useMemo } from 'react';
+import { ChevronDown, ArrowDownUp, Loader2 } from 'lucide-react';
+import { getTokens, getQuote, buildSwapTransaction, getTokenPriceUSD, resolveCoinGeckoId } from '../services/api';
+import type { Token } from '../services/api';
+import { useAccount, useSendTransaction, useSwitchChain } from 'wagmi';
+import { useWallet } from '@tronweb3/tronwallet-adapter-react-hooks';
+
+export default function SwapWidget() {
+    const { address: evmAddress, connector, chainId: currentChainId } = useAccount();
+    const { address: tronAddress, signTransaction } = useWallet();
+    const { sendTransactionAsync } = useSendTransaction();
+    const { switchChainAsync } = useSwitchChain();
+
+    // Unified address
+    const [tokens, setTokens] = useState<Token[]>([]);
+    const [selectedChain, setSelectedChain] = useState<string>('');
+    const [loadingTokens, setLoadingTokens] = useState(true);
+
+    const [fromToken, setFromToken] = useState<Token | null>(null);
+    const [toToken, setToToken] = useState<Token | null>(null);
+    const [fromTokenPrice, setFromTokenPrice] = useState<number | null>(null);
+    const [toTokenPrice, setToTokenPrice] = useState<number | null>(null);
+
+    const [sellAmount, setSellAmount] = useState('');
+    const [quote, setQuote] = useState<any>(null);
+    const [loadingQuote, setLoadingQuote] = useState(false);
+    const [quoteTimer, setQuoteTimer] = useState(0);
+
+    const [isSwapping, setIsSwapping] = useState(false);
+    const [swapResult, setSwapResult] = useState<any>(null);
+    const [error, setError] = useState<string | null>(null);
+
+    const [modalOpen, setModalOpen] = useState<'from' | 'to' | null>(null);
+    const [searchQuery, setSearchQuery] = useState('');
+
+    // Helper to extract the cleanest ticker symbol from identifier (e.g. CHAIN.TICKER-ADDRESS)
+    const getTokenSymbol = (t: Token | null) => {
+        if (!t) return 'Select';
+        if (t.identifier) {
+            const parts = t.identifier.split('.');
+            if (parts.length > 1) {
+                return parts[1].split('-')[0];
+            }
+        }
+        return t.symbol || t.name || 'Unknown';
+    };
+
+    useEffect(() => {
+        const fetchTokens = async () => {
+            try {
+                const data = await getTokens();
+                let tokenList: Token[] = [];
+                // The API actually returns an array of objects where each object is a Provider
+                // e.g. [{"provider": "ONEINCH", "tokens": [...]}]
+                if (data && Array.isArray(data)) {
+                    const allTokens: Token[] = [];
+
+                    data.forEach((providerObj: any) => {
+                        if (providerObj && Array.isArray(providerObj.tokens)) {
+                            allTokens.push(...providerObj.tokens);
+                        }
+                    });
+
+                    // Deduplicate by string identifier ONLY (so 'From' side has all variants)
+                    const uniqueMap = new Map<string, Token>();
+
+                    allTokens.forEach(t => {
+                        if (t && t.identifier && !uniqueMap.has(t.identifier)) {
+                            uniqueMap.set(t.identifier, t);
+                        }
+                    });
+
+                    tokenList = Array.from(uniqueMap.values());
+                }
+
+                setTokens(tokenList);
+
+                // Default selection
+                const defaultFrom = tokenList.find((t: Token) =>
+                    t.chain === 'TRON' && (t.symbol?.includes('USDT') || t.ticker?.includes('USDT') || t.identifier?.includes('USDT'))
+                );
+                if (defaultFrom) setFromToken(defaultFrom);
+
+                const bscUsdt = tokenList.find((t: Token) => t.identifier === 'BSC.USDT' || t.identifier === 'BSC.USDT-0x55d398326f99059fF775485246999027B3197955');
+                if (bscUsdt) setToToken(bscUsdt);
+            } catch (err) {
+                console.error('Failed to fetch tokens', err);
+                setError('Failed to load tokens.');
+            } finally {
+                setLoadingTokens(false);
+            }
+        };
+        fetchTokens();
+    }, []);
+
+    useEffect(() => {
+        if (sellAmount && Number(sellAmount) > 0 && fromToken && toToken) {
+            setSwapResult(null);
+            setError(null);
+            const fetchQuote = async () => {
+                setLoadingQuote(true);
+                setError(null);
+                try {
+                    const data = await getQuote(fromToken.identifier, toToken.identifier, sellAmount);
+                    setQuote(data);
+                    setQuoteTimer(60);
+                } catch (err: any) {
+                    console.error(err);
+                    setError(err?.response?.data?.message || 'Failed to fetch quote');
+                    setQuote(null);
+                    setQuoteTimer(0);
+                } finally {
+                    setLoadingQuote(false);
+                }
+            };
+
+            const timeoutId = setTimeout(fetchQuote, 500); // debounce
+            return () => clearTimeout(timeoutId);
+        } else {
+            setQuote(null);
+            setQuoteTimer(0);
+        }
+    }, [sellAmount, fromToken, toToken]);
+
+    // Timer countdown and refresh
+    useEffect(() => {
+        let interval: any;
+        if (quote && quoteTimer > 0) {
+            interval = setInterval(() => {
+                setQuoteTimer((prev) => prev - 1);
+            }, 1000);
+        } else if (quoteTimer === 0 && quote && !loadingQuote && !error) {
+            const reFetchQuote = async () => {
+                setLoadingQuote(true);
+                setError(null);
+                try {
+                    const data = await getQuote(fromToken!.identifier, toToken!.identifier, sellAmount);
+                    setQuote(data);
+                    setQuoteTimer(60);
+                } catch (err: any) {
+                    console.error(err);
+                    setError(err?.response?.data?.message || 'Failed to re-fetch quote');
+                    setQuote(null);
+                } finally {
+                    setLoadingQuote(false);
+                }
+            };
+            reFetchQuote();
+        }
+        return () => clearInterval(interval);
+    }, [quoteTimer, quote, loadingQuote, error, fromToken, toToken, sellAmount]);
+
+    useEffect(() => {
+        const id = fromToken ? resolveCoinGeckoId(fromToken) : undefined;
+        if (id) {
+            getTokenPriceUSD(id).then(setFromTokenPrice);
+        } else {
+            setFromTokenPrice(null);
+        }
+    }, [fromToken]);
+
+    useEffect(() => {
+        const id = toToken ? resolveCoinGeckoId(toToken) : undefined;
+        if (id) {
+            getTokenPriceUSD(id).then(setToTokenPrice);
+        } else {
+            setToTokenPrice(null);
+        }
+    }, [toToken]);
+
+    const getAddressForChain = (chain?: string) => {
+        const uChain = chain?.toUpperCase();
+        const evmChains = ['ETH', 'BSC', 'ARB', 'OP', 'BASE', 'POL', 'AVAX', 'SCROLL', 'BLAST', 'LINEA', 'FANTOM', 'MOONBEAM', 'GNOSIS'];
+        const isEvm = uChain && evmChains.includes(uChain);
+
+        if (isEvm) {
+            // Only return evmAddress if the active connector is NOT TronLink
+            if (connector?.id === 'tronLink') return '';
+            return evmAddress || '';
+        }
+
+        if (uChain === 'TRON') {
+            // 1. Try native Tron address first
+            if (tronAddress) return tronAddress;
+
+            // 2. Fallback to deriving from Wagmi if it's the TronLink connector
+            if (connector?.id === 'tronLink' && evmAddress?.startsWith('0x')) {
+                try {
+                    const tronHex = evmAddress.replace(/^0x/, '41');
+                    return (window as any).tronWeb?.address?.fromHex(tronHex);
+                } catch {
+                    return '';
+                }
+            }
+            return '';
+        }
+
+        return '';
+    };
+
+    const handleSwap = async () => {
+        if (!quote?.routes?.[0]?.routeId) return;
+        setIsSwapping(true);
+        setError(null);
+        setSwapResult(null);
+
+        try {
+            const sourceAddress = getAddressForChain(fromToken?.chain);
+            const destinationAddress = getAddressForChain(toToken?.chain);
+
+            if (!sourceAddress) throw new Error(`Please connect a ${fromToken?.chain} wallet to swap from ${fromToken?.symbol}.`);
+            if (!destinationAddress) throw new Error(`Please connect a ${toToken?.chain} wallet to receive ${toToken?.symbol}.`);
+
+            const res = await buildSwapTransaction(quote.routes[0].routeId, sourceAddress, destinationAddress);
+
+            // 1. Handle signing/broadcasting
+            if (fromToken?.chain === 'TRON') {
+                if (!signTransaction) throw new Error('Tron wallet does not support signing');
+                // SwapKit returns the Tron transaction object under res.tx
+                const signedTx = await signTransaction(res.tx);
+                const tronWeb = (window as any).tronWeb;
+                const broadcastRes = await tronWeb.trx.sendRawTransaction(signedTx);
+                if (broadcastRes.result) {
+                    setSwapResult({ ...res, txHash: broadcastRes.txid });
+                } else {
+                    throw new Error('Failed to broadcast Tron transaction');
+                }
+            } else {
+                // EVM
+                const txData = res.tx;
+                const targetChainId = txData.chainId;
+
+                if (targetChainId && currentChainId !== targetChainId) {
+                    await switchChainAsync({ chainId: targetChainId });
+                }
+
+                const txHash = await sendTransactionAsync({
+                    to: txData.to as `0x${string}`,
+                    data: txData.data as `0x${string}`,
+                    value: txData.value ? BigInt(txData.value) : undefined,
+                });
+                setSwapResult({ ...res, txHash });
+            }
+        } catch (err: any) {
+            console.error(err);
+            setError(err?.message || err?.response?.data?.message || 'Failed to complete swap');
+        } finally {
+            setIsSwapping(false);
+        }
+    };
+
+    // Strictly filter receive tokens to only the true BSC stablecoins (no overnight/bridged)
+    const allowedToTokens = tokens.filter(t =>
+        t.identifier === 'BSC.USDT-0x55d398326f99059fF775485246999027B3197955' ||
+        t.identifier === 'BSC.USDC-0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d' ||
+        t.identifier === 'BSC.BNB' ||
+        t.identifier === 'BSC.USDT' ||
+        t.identifier === 'BSC.USDC'
+    );
+
+    const uniqueChains = useMemo(() => {
+        const chains = new Set<string>();
+        tokens.forEach(t => { if (t.chain) chains.add(t.chain); });
+        return Array.from(chains).sort();
+    }, [tokens]);
+
+    const renderedTokens = useMemo(() => {
+        let list = modalOpen === 'to' ? allowedToTokens : tokens;
+
+        if (selectedChain && modalOpen === 'from') {
+            list = list.filter(t => t.chain === selectedChain);
+        }
+
+        if (searchQuery) {
+            const query = searchQuery.toLowerCase();
+            list = list.filter(t =>
+                (t.identifier && t.identifier.toLowerCase().includes(query)) ||
+                (t.name && t.name.toLowerCase().includes(query)) ||
+                (t.symbol && t.symbol.toLowerCase().includes(query))
+            );
+        }
+
+        // Limit to 100 to prevent rendering lag (glitches)
+        return list.slice(0, 100);
+    }, [tokens, allowedToTokens, modalOpen, selectedChain, searchQuery]);
+
+    const CHAIN_LOGO_OVERRIDES: Record<string, string> = {
+        'ARB': 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/arbitrum/info/logo.png',
+        'AVAX': 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/avalanchec/info/logo.png',
+        'BASE': 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/info/logo.png',
+        'BSC': 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/smartchain/info/logo.png',
+        'BTC': 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/bitcoin/info/logo.png',
+        'ETH': 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/info/logo.png',
+        'OP': 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/optimism/info/logo.png',
+        'POL': 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/polygon/info/logo.png',
+        'SOL': 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/info/logo.png',
+        'TRON': 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/tron/info/logo.png',
+    };
+
+    // Helper to get a logo for a chain
+    const getChainLogo = (chainName: string) => {
+        const uChain = chainName.toUpperCase();
+        if (CHAIN_LOGO_OVERRIDES[uChain]) return CHAIN_LOGO_OVERRIDES[uChain];
+
+        // 1. Try to find a specific token whose symbol exactly matches the chain name
+        let token = tokens.find(t => t.chain === chainName && t.symbol?.toUpperCase() === uChain && t.logoURI);
+
+        // 2. Fallback: find any token on that chain with a logo
+        if (!token) {
+            token = tokens.find(t => t.chain === chainName && t.logoURI);
+        }
+        return token?.logoURI;
+    };
+
+    return (
+        <div className="w-full max-w-[480px] mx-auto">
+            <div className="glass rounded-[32px] p-4 flex flex-col gap-2 relative z-10 overflow-hidden">
+                {/* Glow effect */}
+                <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[200px] h-[200px] bg-primary/20 blur-[100px] rounded-full pointer-events-none" />
+
+                <div className="flex justify-between items-center px-4 py-2 relative z-10">
+                    <h2 className="text-xl font-bold bg-gradient-to-r from-white to-white/70 bg-clip-text text-transparent">Swap</h2>
+                    <div className="flex items-center gap-2">
+                        {quote && quoteTimer > 0 && !loadingQuote && !error && (
+                            <div className="relative w-8 h-8 flex items-center justify-center shrink-0">
+                                <svg className="w-full h-full -rotate-90 transform" viewBox="0 0 36 36">
+                                    <circle cx="18" cy="18" r="16" fill="none" className="stroke-white/10" strokeWidth="3" />
+                                    <circle cx="18" cy="18" r="16" fill="none" className="stroke-primary" strokeWidth="3" strokeDasharray="100" strokeDashoffset={100 - (quoteTimer / 60) * 100} strokeLinecap="round" />
+                                </svg>
+                                <span className="absolute text-[10px] font-bold text-white/90">{quoteTimer}</span>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* From Input */}
+                <div className="bg-surface/50 rounded-2xl p-4 border border-white/5 relative z-10 group focus-within:border-primary/50 transition-colors">
+                    <label className="text-sm text-white/50 mb-2 block">You pay</label>
+                    <div className="flex justify-between items-center">
+                        <input
+                            type="number"
+                            min="0"
+                            placeholder="0.0"
+                            className="bg-transparent text-4xl font-medium outline-none w-full placeholder:text-white/20 text-white appearance-none [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                            value={sellAmount}
+                            onWheel={(e) => (e.target as HTMLElement).blur()}
+                            onKeyDown={(e) => {
+                                // Prevent negative sign, scientific notation 'e', and '+' symbol
+                                if (e.key === '-' || e.key === 'e' || e.key === 'E' || e.key === '+') {
+                                    e.preventDefault();
+                                }
+                            }}
+                            onChange={(e) => {
+                                // Double check the value is valid
+                                const val = e.target.value;
+                                if (Number(val) >= 0 || val === '') {
+                                    setSellAmount(val);
+                                }
+                            }}
+                        />
+                        <button
+                            onClick={() => setModalOpen('from')}
+                            className="glass-button rounded-full py-2 px-4 pr-3 flex items-center gap-3 shrink-0 ml-4 hover:scale-105 active:scale-95 transition-all"
+                        >
+                            {loadingTokens && !fromToken ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                            {fromToken && (
+                                <div className="flex items-center gap-3">
+                                    <div className="relative shrink-0">
+                                        {fromToken.logoURI ? (
+                                            <img src={fromToken.logoURI} className="w-8 h-8 rounded-full bg-white/10" alt="" />
+                                        ) : (
+                                            <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center">
+                                                <span className="text-[10px]">{getTokenSymbol(fromToken).slice(0, 3)}</span>
+                                            </div>
+                                        )}
+                                        {fromToken.chain && getChainLogo(fromToken.chain) && (
+                                            <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full border border-[rgb(20,20,20)] overflow-hidden bg-[rgb(20,20,20)]">
+                                                <img src={getChainLogo(fromToken.chain)!} alt={fromToken.chain} className="w-full h-full object-cover" />
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="flex flex-col items-start leading-none gap-1">
+                                        <span className="font-bold text-base">{getTokenSymbol(fromToken)}</span>
+                                        <span className="text-[10px] text-white/50 font-medium uppercase">{fromToken.chain}</span>
+                                    </div>
+                                </div>
+                            )}
+                            {(!fromToken && !loadingTokens) && <span className="font-bold">Select</span>}
+                            <ChevronDown className="w-4 h-4 text-white/50 ml-1" />
+                        </button>
+                    </div>
+                    <div className="flex justify-between items-center mt-2 h-5">
+                        <span className="text-sm font-medium text-white/50">
+                            {sellAmount && fromTokenPrice ? `$${(Number(sellAmount) * fromTokenPrice).toFixed(2)}` : ''}
+                        </span>
+                    </div>
+                </div>
+
+                {/* Swap Direction Button */}
+                <div className="relative h-2 my-[-8px] z-20 flex justify-center">
+                    <button
+                        className="absolute top-1/2 -translate-y-1/2 bg-surface border-4 border-[#0a0a0a] rounded-xl p-2 hover:bg-white/10 transition-colors group"
+                        onClick={() => {
+                            if (fromToken && allowedToTokens.find(t => t.identifier === fromToken.identifier)) {
+                                const temp = fromToken;
+                                setFromToken(toToken);
+                                setToToken(temp);
+                            }
+                        }}
+                    >
+                        <ArrowDownUp className="w-4 h-4 text-white/70 group-hover:rotate-180 transition-transform duration-300" />
+                    </button>
+                </div>
+
+                {/* To Input */}
+                <div className="bg-surface/50 rounded-2xl p-4 border border-white/5 relative z-10 group focus-within:border-primary/50 transition-colors">
+                    <label className="text-sm text-white/50 mb-2 block">You receive</label>
+                    <div className="flex justify-between items-center">
+                        <input
+                            type="number"
+                            placeholder="0.0"
+                            readOnly
+                            className="bg-transparent text-4xl font-medium outline-none w-full placeholder:text-white/20 text-white cursor-not-allowed"
+                            value={quote?.routes?.[0]?.expectedBuyAmount ? Number(quote.routes[0].expectedBuyAmount).toFixed(5) : ''}
+                            onWheel={(e) => (e.target as HTMLElement).blur()}
+                        />
+                        <button
+                            onClick={() => setModalOpen('to')}
+                            className="glass-button rounded-full py-2 px-4 pr-3 flex items-center gap-3 shrink-0 ml-4 hover:scale-105 active:scale-95 transition-all"
+                        >
+                            {toToken && (
+                                <div className="flex items-center gap-3">
+                                    <div className="relative shrink-0">
+                                        {toToken.logoURI ? (
+                                            <img src={toToken.logoURI} className="w-8 h-8 rounded-full bg-white/10" alt="" />
+                                        ) : (
+                                            <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center">
+                                                <span className="text-[10px]">{getTokenSymbol(toToken).slice(0, 3)}</span>
+                                            </div>
+                                        )}
+                                        {toToken.chain && getChainLogo(toToken.chain) && (
+                                            <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full border border-[rgb(20,20,20)] overflow-hidden bg-[rgb(20,20,20)]">
+                                                <img src={getChainLogo(toToken.chain)!} alt={toToken.chain} className="w-full h-full object-cover" />
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="flex flex-col items-start leading-none gap-1">
+                                        <span className="font-bold text-base">{getTokenSymbol(toToken)}</span>
+                                        <span className="text-[10px] text-white/50 font-medium uppercase">{toToken.chain}</span>
+                                    </div>
+                                </div>
+                            )}
+                            {!toToken && <span className="font-bold">Select</span>}
+                            <ChevronDown className="w-4 h-4 text-white/50 ml-1" />
+                        </button>
+                    </div>
+                    <div className="flex justify-between items-center mt-2 h-5">
+                        <span className="text-sm font-medium text-white/50">
+                            {quote?.routes?.[0]?.expectedBuyAmount && toTokenPrice ? `$${(Number(quote.routes[0].expectedBuyAmount) * toTokenPrice).toFixed(2)}` : ''}
+                        </span>
+                    </div>
+                </div>
+
+                {/* Error / Quote Data */}
+                {error && (
+                    <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-sm mt-2 relative z-10">
+                        {error}
+                    </div>
+                )}
+
+                {quote?.routes?.[0] && !error && (
+                    <div className="flex flex-col gap-1 px-4 py-2 relative z-10 text-sm text-white/50">
+                        <div className="flex justify-between">
+                            <span>Expected Output</span>
+                            <span className="text-white">{Number(quote.routes[0].expectedBuyAmount).toFixed(5)} {toToken?.symbol}</span>
+                        </div>
+                        <div className="flex justify-between items-start w-full">
+                            <span className="whitespace-nowrap">Total Fees</span>
+                            <div className="flex flex-col items-end gap-1 text-white w-full ml-4">
+                                {(() => {
+                                    const groupedFees: Record<string, { amount: number; asset: string; name: string }> = {};
+                                    quote.routes[0].fees?.forEach((f: any) => {
+                                        const amount = parseFloat(f.amount);
+                                        if (amount > 0) {
+                                            let typeName = f.type ? f.type.charAt(0).toUpperCase() + f.type.slice(1).replace(/_/g, ' ') + ' Fee' : 'Fee';
+                                            if (f.type === 'affiliate' || f.type === 'service') {
+                                                typeName = 'Platform Fee'; // Combine affiliate and service fees
+                                            }
+                                            const tokenSymbol = f.asset.split('.')[1]?.split('-')[0] || f.asset;
+                                            const key = `${typeName}-${tokenSymbol}`;
+
+                                            if (!groupedFees[key]) {
+                                                groupedFees[key] = { amount: 0, asset: tokenSymbol, name: typeName };
+                                            }
+                                            groupedFees[key].amount += amount;
+                                        }
+                                    });
+
+                                    return Object.values(groupedFees).map((fee, i) => (
+                                        <div key={i} className="flex justify-between w-full gap-4">
+                                            <span className="text-white/50">{fee.name}</span>
+                                            <span>
+                                                {fee.amount.toPrecision(3)} {fee.asset}
+                                            </span>
+                                        </div>
+                                    ));
+                                })()}
+                                {!quote.routes[0].fees?.some((f: any) => parseFloat(f.amount) > 0) && (
+                                    <span>$0.00</span>
+                                )}
+                            </div>
+                        </div>
+                        <div className="flex justify-between">
+                            <span>Estimated Time</span>
+                            <span className="text-white">{Math.floor((quote.routes[0].estimatedTime?.total || 0) / 60)} min</span>
+                        </div>
+                    </div>
+                )}
+
+                {/* Swap Result Status */}
+                {swapResult && (
+                    <div className="p-4 bg-green-500/10 border border-green-500/20 rounded-xl text-green-500 text-sm mt-2 relative z-10 overflow-hidden break-all">
+                        <div className="font-bold text-green-400 mb-1">Swap Successful!</div>
+                        {swapResult.txHash && <div className="mb-1">Transaction Hash: <span className="text-white font-mono">{swapResult.txHash}</span></div>}
+                        Target Address: {swapResult.targetAddress || swapResult.destinationAddress}
+                    </div>
+                )}
+
+                <button
+                    onClick={handleSwap}
+                    disabled={!fromToken || !toToken || !getAddressForChain(fromToken?.chain) || !getAddressForChain(toToken?.chain) || !quote || isSwapping || loadingQuote}
+                    className="w-full bg-primary hover:bg-primary/90 disabled:bg-primary/50 disabled:cursor-not-allowed text-white text-lg font-bold py-4 rounded-2xl mt-2 transition-all active:scale-[0.98] relative z-10 flex items-center justify-center gap-2"
+                >
+                    {loadingQuote ? (
+                        <Loader2 className="w-6 h-6 animate-spin" />
+                    ) : isSwapping ? (
+                        <Loader2 className="w-6 h-6 animate-spin" />
+                    ) : !fromToken || !toToken ? (
+                        'Select Tokens'
+                    ) : !getAddressForChain(fromToken?.chain) ? (
+                        `Connect ${fromToken.chain} Wallet`
+                    ) : !getAddressForChain(toToken?.chain) ? (
+                        `Connect ${toToken.chain} Wallet`
+                    ) : !quote ? (
+                        'Enter Amount'
+                    ) : (
+                        'Swap'
+                    )}
+                </button>
+            </div>
+
+            {/* Token Modal */}
+            {modalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setModalOpen(null)} />
+                    <div className="glass rounded-[32px] w-full max-w-[500px] h-[650px] flex flex-col relative z-10 border border-white/10 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                        <div className="p-4 border-b border-white/10 flex justify-between items-center shrink-0">
+                            <h3 className="font-bold text-lg">Select Token</h3>
+                            <button onClick={() => setModalOpen(null)} className="text-white/50 hover:text-white p-2">✕</button>
+                        </div>
+                        <div className="p-4 border-b border-white/10 shrink-0">
+                            <input
+                                type="text"
+                                placeholder="Search name or paste address"
+                                className="w-full bg-black/40 border border-white/10 rounded-xl py-3 px-4 outline-none focus:border-primary/50 text-white placeholder:text-white/30"
+                                value={searchQuery}
+                                onChange={(e) => setSearchQuery(e.target.value)}
+                            />
+                        </div>
+
+                        {/* Chain filters (75% height, scrollable) */}
+                        {modalOpen === 'from' && uniqueChains.length > 0 && (
+                            <div className="flex-1 overflow-y-auto border-b border-white/10 p-4 shrink-0">
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                    <button
+                                        onClick={() => setSelectedChain('')}
+                                        className={`flex items-center justify-center px-4 py-3 rounded-2xl text-sm font-bold transition-all ${selectedChain === '' ? 'bg-white/20 text-white' : 'bg-white/5 text-white/70 hover:bg-white/10 disabled:opacity-50'}`}
+                                    >
+                                        <span>ALL</span>
+                                    </button>
+                                    {uniqueChains.filter(chain => getChainLogo(chain)).map(chain => {
+                                        const logo = getChainLogo(chain);
+                                        return (
+                                            <button
+                                                key={chain}
+                                                onClick={() => setSelectedChain(chain)}
+                                                className={`flex items-center gap-2 px-3 py-2 rounded-2xl text-sm font-bold transition-all ${selectedChain === chain ? 'bg-primary/20 text-white border border-primary/30' : 'bg-transparent text-white/90 hover:bg-white/5 border border-transparent'}`}
+                                            >
+                                                <div className="w-6 h-6 rounded-full overflow-hidden shrink-0 flex items-center justify-center">
+                                                    <img src={logo} alt={chain} className="w-full h-full object-cover" />
+                                                </div>
+                                                <span className="text-left leading-tight text-sm whitespace-normal break-words">{chain}</span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Tokens list (25% height when chains shown, else flex-1) */}
+                        <div className={`${modalOpen === 'from' && uniqueChains.length > 0 ? 'h-[25%] min-h-[150px]' : 'flex-1'} overflow-y-auto p-2 bg-black/20 shrink-0`}>
+                            {renderedTokens.length === 0 ? (
+                                <div className="p-8 text-center text-white/40">No tokens found.</div>
+                            ) : (
+                                renderedTokens.map((t) => {
+                                    const chainLogo = getChainLogo(t.chain || '');
+                                    return (
+                                        <button
+                                            key={t.identifier}
+                                            className="w-full flex items-center gap-4 p-3 hover:bg-white/5 rounded-xl transition-colors text-left"
+                                            onClick={() => {
+                                                if (modalOpen === 'from') setFromToken(t);
+                                                else setToToken(t);
+                                                setModalOpen(null);
+                                                setSearchQuery('');
+                                            }}
+                                        >
+                                            <div className="relative shrink-0">
+                                                <div className="w-10 h-10 rounded-full bg-white/10 overflow-hidden flex items-center justify-center">
+                                                    {t.logoURI ? (
+                                                        <img src={t.logoURI} alt={t.symbol} className="w-full h-full object-cover" />
+                                                    ) : (
+                                                        <span className="text-white/50 text-xs">{t.symbol?.slice(0, 3)}</span>
+                                                    )}
+                                                </div>
+                                                {/* Mini chain badge */}
+                                                {chainLogo && (
+                                                    <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full border border-black overflow-hidden bg-black">
+                                                        <img src={chainLogo} alt={t.chain} className="w-full h-full object-cover" />
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="flex flex-col">
+                                                <span className="font-bold text-lg leading-none">{getTokenSymbol(t)}</span>
+                                                <span className="text-sm text-white/50 mt-1">{t.chain}</span>
+                                            </div>
+                                        </button>
+                                    );
+                                })
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
