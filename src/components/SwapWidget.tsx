@@ -174,26 +174,25 @@ export default function SwapWidget() {
         const isEvm = uChain && evmChains.includes(uChain);
 
         if (isEvm) {
-            // Only return evmAddress if the active connector is NOT TronLink
             if (connector?.id === 'tronLink') return '';
             return evmAddress || '';
         }
 
         if (uChain === 'TRON') {
-            // 1. Try native Tron adapter address first (TronLink, etc.)
+            // 1. Try native Tron adapter address first
             if (tronAddress) return tronAddress;
 
-            // 2. Fallback to Wagmi/ConnectKit if we have an address
-            // We allow returning the address if we have ANY EVM address 
-            // from a connector that might support Tron (like Vultisig).
+            // 2. Fallback to deriving from Wagmi/AppKit
             if (evmAddress) {
                 try {
                     const tronWeb = (window as any).tronWeb;
                     if (tronWeb?.address?.fromHex) {
                         return tronWeb.address.fromHex(evmAddress.replace(/^0x/, '41'));
                     }
-                    // If no tronWeb, just return the address as-is. 
-                    // This will enable the "Swap" button instead of "Connect Wallet".
+                    if (evmAddress.startsWith('0x')) {
+                        // Return hex as fallback to enable UI
+                        return evmAddress.replace(/^0x/, '41');
+                    }
                     return evmAddress;
                 } catch {
                     return evmAddress;
@@ -222,19 +221,35 @@ export default function SwapWidget() {
 
             // 1. Handle signing/broadcasting
             if (fromToken?.chain === 'TRON') {
+                const tronWeb = (window as any).tronWeb;
+                let signedTx;
+
+                // Try native adapter first
                 if (signTransaction) {
-                    // Try native Tron signing
-                    const signedTx = await signTransaction(res.tx);
-                    const tronWeb = (window as any).tronWeb;
-                    const broadcastRes = await tronWeb.trx.sendRawTransaction(signedTx);
-                    if (broadcastRes.result) {
-                        setSwapResult({ ...res, txHash: broadcastRes.txid });
-                    } else {
-                        throw new Error(broadcastRes.message || 'Failed to broadcast Tron transaction');
+                    try {
+                        signedTx = await signTransaction(res.tx);
+                    } catch (err: any) {
+                        // If it's a "No wallet is selected" error, try direct injected provider
+                        if (err?.message?.includes('No wallet is selected') && tronWeb?.trx?.sign) {
+                            signedTx = await tronWeb.trx.sign(res.tx);
+                        } else {
+                            throw err;
+                        }
                     }
+                } else if (tronWeb?.trx?.sign) {
+                    // Try direct signing if no adapter present (multi-chain case)
+                    signedTx = await tronWeb.trx.sign(res.tx);
                 } else {
-                    // No signTransaction - user likely connected via AppKit (Multi-chain)
                     throw new Error('Please connect using a Tron wallet (like TronLink) to sign this transaction.');
+                }
+
+                if (!signedTx) throw new Error('Transaction was not signed');
+
+                const broadcastRes = await tronWeb.trx.sendRawTransaction(signedTx);
+                if (broadcastRes.result) {
+                    setSwapResult({ ...res, txHash: broadcastRes.txid });
+                } else {
+                    throw new Error(broadcastRes.message || 'Failed to broadcast Tron transaction');
                 }
             } else {
                 // EVM
