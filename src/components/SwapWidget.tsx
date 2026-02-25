@@ -180,16 +180,23 @@ export default function SwapWidget() {
         }
 
         if (uChain === 'TRON') {
-            // 1. Try native Tron address first
+            // 1. Try native Tron adapter address first (TronLink, etc.)
             if (tronAddress) return tronAddress;
 
-            // 2. Fallback to deriving from Wagmi if it's the TronLink connector
-            if (connector?.id === 'tronLink' && evmAddress?.startsWith('0x')) {
+            // 2. Fallback to Wagmi/ConnectKit if we have an address
+            // We allow returning the address if we have ANY EVM address 
+            // from a connector that might support Tron (like Vultisig).
+            if (evmAddress) {
                 try {
-                    const tronHex = evmAddress.replace(/^0x/, '41');
-                    return (window as any).tronWeb?.address?.fromHex(tronHex);
+                    const tronWeb = (window as any).tronWeb;
+                    if (tronWeb?.address?.fromHex) {
+                        return tronWeb.address.fromHex(evmAddress.replace(/^0x/, '41'));
+                    }
+                    // If no tronWeb, just return the address as-is. 
+                    // This will enable the "Swap" button instead of "Connect Wallet".
+                    return evmAddress;
                 } catch {
-                    return '';
+                    return evmAddress;
                 }
             }
             return '';
@@ -215,15 +222,19 @@ export default function SwapWidget() {
 
             // 1. Handle signing/broadcasting
             if (fromToken?.chain === 'TRON') {
-                if (!signTransaction) throw new Error('Tron wallet does not support signing');
-                // SwapKit returns the Tron transaction object under res.tx
-                const signedTx = await signTransaction(res.tx);
-                const tronWeb = (window as any).tronWeb;
-                const broadcastRes = await tronWeb.trx.sendRawTransaction(signedTx);
-                if (broadcastRes.result) {
-                    setSwapResult({ ...res, txHash: broadcastRes.txid });
+                if (signTransaction) {
+                    // Try native Tron signing
+                    const signedTx = await signTransaction(res.tx);
+                    const tronWeb = (window as any).tronWeb;
+                    const broadcastRes = await tronWeb.trx.sendRawTransaction(signedTx);
+                    if (broadcastRes.result) {
+                        setSwapResult({ ...res, txHash: broadcastRes.txid });
+                    } else {
+                        throw new Error(broadcastRes.message || 'Failed to broadcast Tron transaction');
+                    }
                 } else {
-                    throw new Error('Failed to broadcast Tron transaction');
+                    // No signTransaction - user likely connected via AppKit (Multi-chain)
+                    throw new Error('Please connect using a Tron wallet (like TronLink) to sign this transaction.');
                 }
             } else {
                 // EVM
@@ -243,7 +254,8 @@ export default function SwapWidget() {
             }
         } catch (err: any) {
             console.error(err);
-            setError(err?.message || err?.response?.data?.message || 'Failed to complete swap');
+            const msg = err?.message || err?.response?.data?.message || 'Failed to complete swap';
+            setError(msg);
         } finally {
             setIsSwapping(false);
         }
