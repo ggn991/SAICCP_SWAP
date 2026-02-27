@@ -13,13 +13,17 @@ export default function SwapWidget() {
     const { switchChainAsync } = useSwitchChain();
     const { setOpen: openConnectKit } = useModal();
 
+    const EVM_CHAINS = ['ETH', 'BSC', 'ARB', 'OP', 'BASE', 'POL', 'AVAX', 'SCROLL', 'BLAST', 'LINEA', 'FANTOM', 'MOONBEAM', 'GNOSIS', 'GNO', 'ZKSYNC', 'POLYGON_ZKEVM'];
+    const isEVM = (chain?: string) => EVM_CHAINS.includes(chain?.toUpperCase() || '');
+
     // Helpers
     const getWagmiChainId = (chain?: string) => {
         const uChain = chain?.toUpperCase();
         const chainMap: Record<string, number> = {
             'ETH': 1, 'BSC': 56, 'ARB': 42161, 'OP': 10, 'BASE': 8453,
             'POL': 137, 'AVAX': 43114, 'SCROLL': 534352, 'BLAST': 81457,
-            'LINEA': 59144, 'FANTOM': 250, 'MOONBEAM': 1284, 'GNOSIS': 100,
+            'LINEA': 59144, 'FANTOM': 250, 'MOONBEAM': 1284, 'GNOSIS': 100, 'GNO': 100,
+            'ZKSYNC': 324, 'POLYGON_ZKEVM': 1101
         };
         return chainMap[uChain || ''] || undefined;
     };
@@ -36,15 +40,14 @@ export default function SwapWidget() {
         if (!uChain) return '';
 
         // 1. EVM chains use wagmi
-        const evmChains = ['ETH', 'BSC', 'ARB', 'OP', 'BASE', 'POL', 'AVAX', 'SCROLL', 'BLAST', 'LINEA', 'FANTOM', 'MOONBEAM', 'GNOSIS'];
-        if (evmChains.includes(uChain)) {
+        if (isEVM(uChain)) {
             if (connector?.id === 'tronLink') return ''; // Safety check if TronLink adapter leaked into EVM
             return evmAddress || '';
         }
 
         // 2. Tron uses adapter if present, else multiChain state
         if (uChain === 'TRON') {
-            return multiChainAddresses['TRON'] || '';
+            return tronAddress || multiChainAddresses['TRON'] || '';
         }
 
         // 3. All other chains (BTC, DOGE, SOL, etc.) use multiChain state
@@ -120,6 +123,10 @@ export default function SwapWidget() {
 
                     allTokens.forEach(t => {
                         if (t && t.identifier && !uniqueMap.has(t.identifier)) {
+                            // Ensure address is present for EVM tokens if encoded in identifier
+                            if (!t.address && t.identifier.includes('-0x')) {
+                                t.address = t.identifier.split('-')[1];
+                            }
                             uniqueMap.set(t.identifier, t);
                         }
                     });
@@ -148,6 +155,20 @@ export default function SwapWidget() {
     }, []);
 
     useEffect(() => {
+        setError(null);
+        setSwapResult(null);
+        setFromBalance('0');
+        setQuote(null);
+    }, [fromToken]);
+
+    useEffect(() => {
+        setError(null);
+        setSwapResult(null);
+        setToBalance('0');
+        setQuote(null);
+    }, [toToken]);
+
+    useEffect(() => {
         if (sellAmount && Number(sellAmount) > 0 && fromToken && toToken) {
             setSwapResult(null);
             setError(null);
@@ -156,11 +177,14 @@ export default function SwapWidget() {
                 setError(null);
                 try {
                     const data = await getQuote(fromToken.identifier, toToken.identifier, sellAmount);
+                    if (!data || !data.routes || data.routes.length === 0) {
+                        throw new Error('No routes available for this swap pair.');
+                    }
                     setQuote(data);
                     setQuoteTimer(60);
                 } catch (err: any) {
                     console.error(err);
-                    setError(err?.response?.data?.message || 'Failed to fetch quote');
+                    setError(err?.response?.data?.message || err?.message || 'Failed to fetch quote');
                     setQuote(null);
                     setQuoteTimer(0);
                 } finally {
@@ -189,11 +213,14 @@ export default function SwapWidget() {
                 setError(null);
                 try {
                     const data = await getQuote(fromToken!.identifier, toToken!.identifier, sellAmount);
+                    if (!data || !data.routes || data.routes.length === 0) {
+                        throw new Error('No routes available for this swap pair.');
+                    }
                     setQuote(data);
                     setQuoteTimer(60);
                 } catch (err: any) {
                     console.error(err);
-                    setError(err?.response?.data?.message || 'Failed to re-fetch quote');
+                    setError(err?.response?.data?.message || err?.message || 'Failed to re-fetch quote');
                     setQuote(null);
                 } finally {
                     setLoadingQuote(false);
@@ -223,16 +250,24 @@ export default function SwapWidget() {
     }, [toToken]);
 
     useEffect(() => {
-        if (fromToken?.chain !== 'TRON' && evmFromBal.data) {
-            setFromBalance(evmFromBal.data.formatted);
+        if (fromToken?.chain !== 'TRON') {
+            if (evmFromBal.data && !evmFromBal.isLoading) {
+                setFromBalance(evmFromBal.data.formatted);
+            } else if (!evmAddress || evmFromBal.error) {
+                setFromBalance('0');
+            }
         }
-    }, [evmFromBal.data, fromToken]);
+    }, [evmFromBal.data, evmFromBal.isLoading, evmFromBal.error, fromToken, evmAddress]);
 
     useEffect(() => {
-        if (toToken?.chain !== 'TRON' && evmToBal.data) {
-            setToBalance(evmToBal.data.formatted);
+        if (toToken?.chain !== 'TRON') {
+            if (evmToBal.data && !evmToBal.isLoading) {
+                setToBalance(evmToBal.data.formatted);
+            } else if (!evmAddress || evmToBal.error) {
+                setToBalance('0');
+            }
         }
-    }, [evmToBal.data, toToken]);
+    }, [evmToBal.data, evmToBal.isLoading, evmToBal.error, toToken, evmAddress]);
 
     useEffect(() => {
         const fetchTronBalance = async (token: Token | null, setBal: (val: string) => void) => {
@@ -276,6 +311,9 @@ export default function SwapWidget() {
             const isVultisig = cName.includes('vultisig') || cId.includes('vultisig');
 
             if (uChain === 'TRON') {
+                if (!win.tronWeb && !win.xfi?.tron && !win.vultisig?.tron && !win.tronLink) {
+                    throw new Error('Tron wallet extension not found. Please install TronLink, Ctrl, or Vultisig.');
+                }
                 if (isCtrl && win.xfi?.tron) {
                     const res = await win.xfi.tron.request({ method: 'request_accounts', params: [] });
                     if (res?.[0]) newAddress = res[0];
@@ -283,22 +321,22 @@ export default function SwapWidget() {
                     const res = await win.vultisig.tron.request({ method: 'tron_requestAccounts' });
                     if (res?.[0]) newAddress = res[0];
                 } else if (isVultisig && win.tronWeb) {
-                    // Vultisig likely injects standard tronWeb if it doesn't expose window.vultisig.tron
                     const res = await win.tronWeb.request({ method: 'tron_requestAccounts' });
                     if (res?.code === 200) newAddress = win.tronWeb.defaultAddress.base58;
-                } else if (win.tronLink?.request) {
-                    await win.tronLink.request({ method: 'tron_requestAccounts' });
-                    if (win.tronWeb?.defaultAddress?.base58) {
-                        newAddress = win.tronWeb.defaultAddress.base58;
-                    }
-                } else if (win.xfi?.tron) {
-                    // Ctrl Wallet fallback
-                    const res = await win.xfi.tron.request({ method: 'request_accounts', params: [] });
-                    if (res?.[0]) newAddress = res[0];
                 } else {
-                    throw new Error('No TRON wallet found (TronLink, Vultisig, or Ctrl Wallet)');
+                    if (!isVultisig && !isCtrl && win.tronLink?.request) {
+                        await win.tronLink.request({ method: 'tron_requestAccounts' });
+                        if (win.tronWeb?.defaultAddress?.base58) newAddress = win.tronWeb.defaultAddress.base58;
+                    } else if (!isVultisig && win.xfi?.tron) {
+                        const res = await win.xfi.tron.request({ method: 'request_accounts', params: [] });
+                        if (res?.[0]) newAddress = res[0];
+                    }
+                    if (!newAddress) throw new Error('TRON is not enabled in the wallet, please enable.');
                 }
             } else if (uChain === 'SOL') {
+                if (!win.phantom?.solana && !win.xfi?.solana && !win.vultisig?.solana) {
+                    throw new Error('Solana wallet extension not found. Please install Phantom, Ctrl, or Vultisig.');
+                }
                 if (isCtrl && win.xfi?.solana) {
                     const res = await win.xfi.solana.request({ method: 'connect', params: [] });
                     if (res?.[0]) newAddress = res[0];
@@ -308,35 +346,90 @@ export default function SwapWidget() {
                 } else if (isVultisig && win.vultisig?.solana) {
                     const res = await win.vultisig.solana.request({ method: 'connect', params: [] });
                     if (res?.[0]) newAddress = res[0];
-                } else if (win.phantom?.solana) {
-                    const resp = await win.phantom.solana.connect();
-                    newAddress = resp.publicKey.toString();
-                } else if (win.xfi?.solana) {
-                    const res = await win.xfi.solana.request({ method: 'connect', params: [] });
-                    if (res?.[0]) newAddress = res[0];
-                } else throw new Error('No Solana wallet found');
-            } else if (['BTC', 'DOGE', 'LTC', 'BCH', 'THOR', 'MAYA', 'KUJI', 'DASH', 'GAIA'].includes(uChain)) {
-                // Shared logic for UTXO and Cosmos
+                } else {
+                    if (isCtrl || isVultisig) {
+                        const parent = isCtrl ? (win.xfi?.ethereum || win.xfi?.bitcoin || Object.values(win.xfi).find((p: any) => p.request)) :
+                            (win.vultisig?.ethereum || win.vultisig?.bitcoin || Object.values(win.vultisig).find((p: any) => p.request));
+                        if (parent?.request) {
+                            const resp = await parent.request({ method: 'request_accounts', params: [{ chain: 'solana' }] });
+                            if (Array.isArray(resp) && resp[0]) newAddress = resp[0];
+                        }
+                    }
+
+                    if (!newAddress && !isVultisig && !isCtrl && win.phantom?.solana) {
+                        const resp = await win.phantom.solana.connect();
+                        newAddress = resp.publicKey.toString();
+                    } else if (!newAddress && !isVultisig && !isPhantom && win.xfi?.solana) {
+                        const res = await win.xfi.solana.request({ method: 'connect', params: [] });
+                        if (res?.[0]) newAddress = res[0];
+                    }
+                    if (!newAddress) throw new Error('Solana is not enabled in the wallet, please enable.');
+                }
+            } else if (['BTC', 'DOGE', 'LTC', 'BCH', 'THOR', 'MAYA', 'KUJI', 'DASH', 'GAIA', 'NEAR', 'DOT'].includes(uChain)) {
                 let chainKey = uChain.toLowerCase();
                 if (uChain === 'GAIA') chainKey = 'cosmos';
                 if (uChain === 'BCH') chainKey = 'bitcoincash';
                 if (uChain === 'THOR') chainKey = 'thorchain';
                 if (uChain === 'MAYA') chainKey = 'mayachain';
 
-                if (isCtrl && win.xfi?.[chainKey]) {
-                    const res = await win.xfi[chainKey].request({ method: 'request_accounts', params: [] });
+                if (!win.xfi?.[chainKey] && !win.vultisig?.[chainKey]) {
+                    throw new Error(`${uChain} wallet extension not found. Please install Ctrl or Vultisig.`);
+                }
+                let provider = (isCtrl && win.xfi?.[chainKey]) ? win.xfi[chainKey] :
+                    (isVultisig && win.vultisig?.[chainKey]) ? win.vultisig[chainKey] : null;
+
+                if (provider) {
+                    const res = await provider.request({ method: 'request_accounts', params: [] });
                     if (res?.[0]) newAddress = res[0];
-                } else if (isVultisig && win.vultisig?.[chainKey]) {
-                    const res = await win.vultisig[chainKey].request({ method: 'request_accounts', params: [] });
-                    if (res?.[0]) newAddress = res[0];
-                } else if (win.xfi?.[chainKey]) { // Fallback
-                    const res = await win.xfi[chainKey].request({ method: 'request_accounts', params: [] });
-                    if (res?.[0]) newAddress = res[0];
+                } else if (isCtrl || isVultisig) {
+                    const parent = isCtrl ? (win.xfi?.ethereum || win.xfi?.bitcoin || Object.values(win.xfi).find((p: any) => p.request)) :
+                        (win.vultisig?.ethereum || win.vultisig?.bitcoin || Object.values(win.vultisig).find((p: any) => p.request));
+
+                    if (parent?.request) {
+                        try {
+                            const res = await parent.request({
+                                method: 'request_accounts',
+                                params: [{ chain: chainKey }]
+                            });
+                            if (res?.[0]) newAddress = res[0];
+                            else if (Array.isArray(res) && res.length > 0) newAddress = res[0];
+                        } catch (fallbackErr) {
+                            console.error(`Fallback connection for ${chainName} failed:`, fallbackErr);
+                            throw new Error(`Please ensure ${chainName} is enabled in your ${isCtrl ? 'Ctrl Wallet' : 'Vultisig'} and try again.`);
+                        }
+                    } else {
+                        throw new Error(`${chainName} is not enabled in the wallet, please enable.`);
+                    }
                 } else {
-                    throw new Error(`No ${chainName} standard wallet provider found`);
+                    if (!isVultisig && !isCtrl && win.xfi?.[chainKey]) {
+                        const res = await win.xfi[chainKey].request({ method: 'request_accounts', params: [] });
+                        if (res?.[0]) newAddress = res[0];
+                    }
+
+                    if (!newAddress) throw new Error(`${chainName} is not enabled in the wallet, please enable.`);
                 }
             } else {
-                throw new Error(`Connection for ${chainName} is not yet supported via injected provider.`);
+                if (isCtrl || isVultisig) {
+                    const parent = isCtrl ? (win.xfi?.ethereum || win.xfi?.bitcoin || Object.values(win.xfi || {}).find((p: any) => p.request)) :
+                        (win.vultisig?.ethereum || win.vultisig?.bitcoin || Object.values(win.vultisig || {}).find((p: any) => p.request));
+
+                    if (parent?.request) {
+                        try {
+                            const res = await parent.request({
+                                method: 'request_accounts',
+                                params: [{ chain: chainName.toLowerCase() }]
+                            });
+                            if (res?.[0]) newAddress = res[0];
+                            else if (Array.isArray(res) && res.length > 0) newAddress = res[0];
+                        } catch (fallbackErr) {
+                            console.error(`Generic fallback connection for ${chainName} failed:`, fallbackErr);
+                        }
+                    }
+                }
+
+                if (!newAddress) {
+                    throw new Error(`${chainName} is not enabled in the wallet, please enable.`);
+                }
             }
 
             if (newAddress) {
@@ -353,9 +446,8 @@ export default function SwapWidget() {
         if (fromToken && !getAddressForChain(fromToken.chain)) chainsToConnect.push(fromToken.chain);
         if (toToken && !getAddressForChain(toToken.chain) && toToken.chain !== fromToken?.chain) chainsToConnect.push(toToken.chain);
 
-        const evmChains = ['ETH', 'BSC', 'ARB', 'OP', 'BASE', 'POL', 'AVAX', 'SCROLL', 'BLAST', 'LINEA', 'FANTOM', 'MOONBEAM', 'GNOSIS'];
-        const hasEVM = chainsToConnect.some(c => evmChains.includes(c.toUpperCase()));
-        const nonEVM = chainsToConnect.filter(c => !evmChains.includes(c.toUpperCase()));
+        const hasEVM = chainsToConnect.some(c => isEVM(c));
+        const nonEVM = chainsToConnect.filter(c => !isEVM(c));
 
         if (hasEVM && !evmAddress) {
             setIsConnectingFlow(true); // Mark that user initiated a unified flow
@@ -377,8 +469,7 @@ export default function SwapWidget() {
             if (fromToken && !getAddressForChain(fromToken.chain)) chainsToConnect.push(fromToken.chain);
             if (toToken && !getAddressForChain(toToken.chain) && toToken.chain !== fromToken?.chain) chainsToConnect.push(toToken.chain);
 
-            const evmChains = ['ETH', 'BSC', 'ARB', 'OP', 'BASE', 'POL', 'AVAX', 'SCROLL', 'BLAST', 'LINEA', 'FANTOM', 'MOONBEAM', 'GNOSIS'];
-            const nonEVM = chainsToConnect.filter(c => !evmChains.includes(c.toUpperCase()));
+            const nonEVM = chainsToConnect.filter(c => !isEVM(c));
 
             if (nonEVM.length > 0) {
                 // Execute sequentially
@@ -414,7 +505,9 @@ export default function SwapWidget() {
                 }
             }
 
+            console.log('STEP 1: Building transaction...');
             const res = await buildSwapTransaction(quote.routes[0].routeId, sourceAddress, destinationAddress);
+            console.log('Build Swap Transaction Result:', res);
 
             // 1. Handle signing/broadcasting
             const cName = connector?.name?.toLowerCase() || '';
@@ -424,65 +517,70 @@ export default function SwapWidget() {
             const isVultisig = cName.includes('vultisig') || cId.includes('vultisig');
 
             if (fromToken?.chain === 'TRON') {
+                console.log('STEP 2: Signing Tron transaction...');
                 const win = window as any;
                 let signedTx;
+                let txToSign = res.tx || res.transaction;
 
-                // Priority routing strictly based on Wagmi selection
-                if (isCtrl && win.xfi?.tron) {
-                    try {
-                        signedTx = await win.xfi.tron.request({ method: 'transfer', params: [res.tx] });
-                    } catch (e) {
-                        // Some XFI versions provide sign/send raw 
-                        if (win.tronWeb?.trx?.sign) {
-                            signedTx = await win.tronWeb.trx.sign(res.tx);
-                        } else throw e;
-                    }
-                } else if (isVultisig && win.vultisig?.tron) {
-                    signedTx = await win.vultisig.tron.request({ method: 'transfer', params: [res.tx] });
-                } else if (isVultisig && win.tronWeb?.trx?.sign) {
-                    signedTx = await win.tronWeb.trx.sign(res.tx);
-                } else if (signTransaction) {
-                    try {
-                        signedTx = await signTransaction(res.tx);
-                    } catch (err: any) {
-                        console.error('Adapter signing failed:', err);
-                        const isSelectionError = err?.message?.includes('No wallet is selected') ||
-                            err?.message?.includes('disconnected') ||
-                            err?.name === 'WalletDisconnectedError' ||
-                            err?.name === 'WalletNotFoundError';
-                        if (isSelectionError && win.tronWeb?.trx?.sign) {
-                            try { signedTx = await win.tronWeb.trx.sign(res.tx); }
-                            catch (e: any) { throw e; }
-                        } else throw err;
-                    }
-                } else if (win.tronWeb?.trx?.sign) {
-                    signedTx = await win.tronWeb.trx.sign(res.tx);
-                } else {
-                    throw new Error('Please connect using a Tron wallet to sign this transaction.');
+                if (!txToSign) {
+                    console.error('No transaction found in response:', res);
+                    throw new Error('API response missing transaction data');
                 }
+
+                // For TronWeb, if it's an object with a 'transaction' wrapper (SwapKit sometimes does this)
+                if (txToSign.transaction && typeof txToSign.transaction === 'object') {
+                    txToSign = txToSign.transaction;
+                }
+
+                // Priority routing: ALWAYS try standard tronWeb first if available, as it is the most stable interface for Tron extensions
+                try {
+                    if (win.tronWeb?.trx?.sign) {
+                        signedTx = await win.tronWeb.trx.sign(txToSign);
+                    } else if (isCtrl && win.xfi?.tron) {
+                        signedTx = await win.xfi.tron.request({ method: 'transfer', params: [txToSign] });
+                    } else if (isVultisig && win.vultisig?.tron) {
+                        signedTx = await win.vultisig.tron.request({ method: 'transfer', params: [txToSign] });
+                    } else if (signTransaction) {
+                        // Trust the adapter provided by @tronweb3/tronwallet-adapter-react-hooks
+                        signedTx = await signTransaction(txToSign);
+                    } else {
+                        throw new Error('Please connect using a Tron wallet to sign this transaction.');
+                    }
+                } catch (err: any) {
+                    console.error('Tron signing failed:', err);
+                    const errMsg = err?.message?.toLowerCase() || '';
+                    if (errMsg.includes('unauthorized') || err?.code === 4100 || err?.name === 'UserRejectedRequestError') {
+                        throw new Error("Transaction rejected. Please ensure your Tron wallet is unlocked, review the prompt carefully, and approve the transaction.");
+                    }
+                    if (errMsg.includes('disconnected') || err?.name === 'WalletDisconnectedError' || err?.name === 'WalletNotFoundError') {
+                        throw new Error("Your Tron wallet is disconnected. Please ensure it is logged in and connected.");
+                    }
+                    throw err;
+                }
+
 
                 if (!signedTx) throw new Error('Transaction was not signed');
+                console.log('STEP 3: Broadcasting Tron transaction...', signedTx);
 
-                // If signedTx is a string, it might be the hash already from a transfer provider like XFI
+                // Broaden result extraction to handle various wallet formats
                 if (typeof signedTx === 'string') {
                     setSwapResult({ ...res, txHash: signedTx });
-                } else if (signedTx.txid || signedTx.hash || signedTx.signature) {
-                    // Pre-broadcasted payload
-                    let hash = signedTx.txid || signedTx.hash || signedTx.signature;
-                    if (typeof hash === 'string') {
-                        setSwapResult({ ...res, txHash: hash });
-                    } else {
-                        // It's a raw object needing broadcast
-                        const broadcastRes = await win.tronWeb.trx.sendRawTransaction(signedTx);
-                        if (broadcastRes.result) setSwapResult({ ...res, txHash: broadcastRes.txid });
-                        else throw new Error(broadcastRes.message || 'Failed to broadcast Tron transaction');
-                    }
                 } else {
-                    const broadcastRes = await win.tronWeb.trx.sendRawTransaction(signedTx);
-                    if (broadcastRes.result) setSwapResult({ ...res, txHash: broadcastRes.txid });
-                    else throw new Error(broadcastRes.message || 'Failed to broadcast Tron transaction');
+                    const txHash = signedTx.txID || signedTx.txid || signedTx.hash || signedTx.signature ||
+                        (typeof signedTx === 'object' && signedTx.result === true ? signedTx.txid || signedTx.transaction?.txID : null);
+
+                    if (typeof txHash === 'string') {
+                        setSwapResult({ ...res, txHash });
+                    } else if (win.tronWeb?.trx?.sendRawTransaction) {
+                        // It's likely a raw signed object needing broadcast
+                        const broadcastRes = await win.tronWeb.trx.sendRawTransaction(signedTx);
+                        if (broadcastRes.result) setSwapResult({ ...res, txHash: broadcastRes.txid || broadcastRes.transaction?.txID });
+                        else throw new Error(broadcastRes.message || 'Failed to broadcast Tron transaction');
+                    } else {
+                        throw new Error('Transaction was signed but could not be broadcasted.');
+                    }
                 }
-            } else if (['BTC', 'DOGE', 'LTC', 'BCH', 'THOR', 'MAYA', 'DASH', 'KUJI', 'GAIA'].includes(fromToken?.chain || '')) {
+            } else if (['BTC', 'DOGE', 'LTC', 'BCH', 'THOR', 'MAYA', 'DASH', 'KUJI', 'GAIA', 'NEAR', 'DOT'].includes(fromToken?.chain || '')) {
                 // Shared logic for UTXO and Cosmos
                 let chainKey = fromToken!.chain.toLowerCase();
                 if (chainKey === 'gaia') chainKey = 'cosmos';
@@ -495,16 +593,31 @@ export default function SwapWidget() {
 
                 if (isCtrl && win.xfi?.[chainKey]) provider = win.xfi[chainKey];
                 else if (isVultisig && win.vultisig?.[chainKey]) provider = win.vultisig[chainKey];
-                else provider = win.xfi?.[chainKey] || win.vultisig?.[chainKey];
+                else if (isCtrl || isVultisig) {
+                    // Sign via parent if specific provider is missing
+                    provider = isCtrl ? (win.xfi?.ethereum || win.xfi?.bitcoin || Object.values(win.xfi).find((p: any) => p.request)) :
+                        (win.vultisig?.ethereum || win.vultisig?.bitcoin || Object.values(win.vultisig).find((p: any) => p.request));
+                }
+
+                if (!provider) provider = win.xfi?.[chainKey] || win.vultisig?.[chainKey];
 
                 if (!provider) {
                     throw new Error(`Your wallet does not support ${fromToken?.chain} transactions or is not connected.`);
                 }
 
+                let txToSign = res.tx || res.transaction;
+                if (!txToSign) throw new Error('API response missing transaction data');
+
+                // Unwrap nested transaction object if present
+                if (txToSign.transaction && typeof txToSign.transaction === 'object') {
+                    txToSign = txToSign.transaction;
+                }
+
                 try {
+                    console.log('STEP 2: Signing non-EVM transaction...', txToSign);
                     const txHash = await provider.request({
                         method: 'transfer',
-                        params: [res.tx || res.transaction]
+                        params: [txToSign]
                     });
                     if (!txHash) throw new Error('Transaction was cancelled or failed.');
                     setSwapResult({ ...res, txHash: typeof txHash === 'string' ? txHash : txHash.txid || txHash.hash });
@@ -518,7 +631,12 @@ export default function SwapWidget() {
                 if (isCtrl && win.xfi?.solana) solProvider = win.xfi.solana;
                 else if (isVultisig && win.vultisig?.solana) solProvider = win.vultisig.solana;
                 else if (isPhantom && win.phantom?.solana) solProvider = win.phantom.solana;
-                else solProvider = win.phantom?.solana || win.xfi?.solana || win.vultisig?.solana;
+                else if (isCtrl || isVultisig) {
+                    solProvider = isCtrl ? (win.xfi?.ethereum || win.xfi?.bitcoin || Object.values(win.xfi).find((p: any) => p.request)) :
+                        (win.vultisig?.ethereum || win.vultisig?.bitcoin || Object.values(win.vultisig).find((p: any) => p.request));
+                }
+
+                if (!solProvider) solProvider = win.phantom?.solana || win.xfi?.solana || win.vultisig?.solana;
 
                 if (!solProvider) throw new Error('No Solana wallet available to sign.');
 
@@ -530,11 +648,20 @@ export default function SwapWidget() {
                 }
             } else {
                 // EVM
-                const txData = res.tx;
-                const targetChainId = txData.chainId;
+                let txData = res.tx || res.transaction;
+                if (!txData) throw new Error('API response missing transaction data');
+
+                // Unwrap nested transaction object if present
+                if (txData.transaction && typeof txData.transaction === 'object') {
+                    txData = txData.transaction;
+                }
+
+                const targetChainId = txData.chainId || getWagmiChainId(fromToken?.chain);
+                console.log(`STEP 2: Signing EVM transaction on chain ${targetChainId}...`, txData);
 
                 if (targetChainId && currentChainId !== targetChainId) {
                     try {
+                        console.log(`Switching chain from ${currentChainId} to ${targetChainId}`);
                         await switchChainAsync({ chainId: targetChainId });
                     } catch (err: any) {
                         // Ignore user denial if they already approved the network in wallet
@@ -542,11 +669,33 @@ export default function SwapWidget() {
                     }
                 }
 
-                const txHash = await sendTransactionAsync({
+                const evmTxPayload: any = {
                     to: txData.to as `0x${string}`,
                     data: txData.data as `0x${string}`,
                     value: txData.value ? BigInt(txData.value) : undefined,
-                });
+                    chainId: targetChainId
+                };
+
+                // Only attach gas parameters if they exist and are non-zero,
+                // letting the wallet estimate gas naturally if SwapKit didn't provide strict limits
+                if (txData.gasLimit && txData.gasLimit !== '0' && txData.gasLimit !== 0) {
+                    evmTxPayload.gas = BigInt(txData.gasLimit);
+                }
+
+                // For EIP-1559 transactions
+                if (txData.maxFeePerGas && txData.maxFeePerGas !== '0') {
+                    evmTxPayload.maxFeePerGas = BigInt(txData.maxFeePerGas);
+                }
+                if (txData.maxPriorityFeePerGas && txData.maxPriorityFeePerGas !== '0') {
+                    evmTxPayload.maxPriorityFeePerGas = BigInt(txData.maxPriorityFeePerGas);
+                }
+
+                // For Legacy transactions
+                if (!evmTxPayload.maxFeePerGas && txData.gasPrice && txData.gasPrice !== '0') {
+                    evmTxPayload.gasPrice = BigInt(txData.gasPrice);
+                }
+
+                const txHash = await sendTransactionAsync(evmTxPayload);
                 setSwapResult({ ...res, txHash });
             }
         } catch (err: any) {
@@ -557,10 +706,14 @@ export default function SwapWidget() {
             if (err?.response?.data) {
                 const apiError = err.response.data.message || err.response.data.error || err.response.data.details;
                 if (apiError) msg = apiError;
+            } else if (err?.response?.status) {
+                msg = `API Error ${err.response.status}: ${err.response.statusText}`;
+            } else if (typeof err === 'string') {
+                msg = err;
             }
 
             // Map cryptic messages to user-friendly ones
-            if (msg.includes('The wallet is disconnected') || msg.includes('connect first')) {
+            if (msg.toLowerCase().includes('the wallet is disconnected') || msg.toLowerCase().includes('connect first')) {
                 msg = 'Your Tron wallet is disconnected. Please ensure TronLink is logged in and connected.';
             }
 
@@ -721,9 +874,9 @@ export default function SwapWidget() {
                                 </span>
                             )}
                         </div>
-                        {fromToken && (fromBalance !== '0' && fromBalance !== '') && (
+                        {getAddressForChain(fromToken?.chain) && (
                             <span className="text-sm font-medium text-white/40">
-                                Balance: {parseFloat(fromBalance).toFixed(4)}
+                                Balance: {parseFloat(fromBalance || '0').toFixed(4)}
                             </span>
                         )}
                     </div>
@@ -798,9 +951,9 @@ export default function SwapWidget() {
                                 </span>
                             )}
                         </div>
-                        {toToken && (toBalance !== '0' && toBalance !== '') && (
+                        {getAddressForChain(toToken?.chain) && (
                             <span className="text-sm font-medium text-white/40">
-                                Balance: {parseFloat(toBalance).toFixed(4)}
+                                Balance: {parseFloat(toBalance || '0').toFixed(4)}
                             </span>
                         )}
                     </div>
@@ -871,32 +1024,73 @@ export default function SwapWidget() {
                     </div>
                 )}
 
-                {fromToken && toToken && (!getAddressForChain(fromToken.chain) || !getAddressForChain(toToken.chain)) ? (
-                    <button
-                        onClick={handleUnifiedConnect}
-                        className="w-full bg-primary hover:bg-primary/90 text-white text-lg font-bold py-4 rounded-2xl mt-2 transition-all active:scale-[0.98] relative z-10 flex items-center justify-center gap-2"
-                    >
-                        Connect Wallet
-                    </button>
-                ) : (
-                    <button
-                        onClick={handleSwap}
-                        disabled={!fromToken || !toToken || !quote || isSwapping || loadingQuote}
-                        className="w-full bg-primary hover:bg-primary/90 disabled:bg-primary/50 disabled:cursor-not-allowed text-white text-lg font-bold py-4 rounded-2xl mt-2 transition-all active:scale-[0.98] relative z-10 flex items-center justify-center gap-2"
-                    >
-                        {loadingQuote ? (
-                            <Loader2 className="w-6 h-6 animate-spin" />
-                        ) : isSwapping ? (
-                            <Loader2 className="w-6 h-6 animate-spin" />
-                        ) : !fromToken || !toToken ? (
-                            'Select Tokens'
-                        ) : !quote ? (
-                            'Enter Amount'
-                        ) : (
-                            'Swap'
-                        )}
-                    </button>
-                )}
+                {(() => {
+                    const fromChain = fromToken?.chain;
+                    const fromAddress = getAddressForChain(fromChain);
+                    const toChain = toToken?.chain;
+                    const toAddress = getAddressForChain(toChain);
+                    const fromChainId = getWagmiChainId(fromChain);
+
+                    const needsFromConnect = fromChain && !fromAddress;
+                    const needsToConnect = toChain && !toAddress && toChain !== fromChain;
+                    const needsEvmSwitch = fromAddress && isEVM(fromChain) && fromChainId && currentChainId !== fromChainId;
+                    const hasInsufficientBalance = fromAddress && sellAmount && Number(sellAmount) > Number(fromBalance);
+
+                    if (needsFromConnect || needsToConnect) {
+                        return (
+                            <button
+                                onClick={handleUnifiedConnect}
+                                className="w-full bg-primary hover:bg-primary/90 text-white text-lg font-bold py-4 rounded-2xl mt-2 transition-all active:scale-[0.98] relative z-10 flex items-center justify-center gap-2"
+                            >
+                                {(() => {
+                                    if (needsFromConnect && needsToConnect) return 'Connect Wallets';
+                                    if (needsFromConnect) return `Connect ${fromChain} Wallet`;
+                                    if (needsToConnect) return `Connect ${toChain} Wallet`;
+                                    return 'Connect Wallet';
+                                })()}
+                            </button>
+                        );
+                    }
+
+                    if (needsEvmSwitch) {
+                        return (
+                            <button
+                                onClick={async () => {
+                                    try {
+                                        await switchChainAsync({ chainId: fromChainId! });
+                                    } catch (err) {
+                                        console.error('Failed to switch chain:', err);
+                                    }
+                                }}
+                                className="w-full bg-amber-500 hover:bg-amber-600 text-white text-lg font-bold py-4 rounded-2xl mt-2 transition-all active:scale-[0.98] relative z-10 flex items-center justify-center gap-2"
+                            >
+                                Switch to {fromChain}
+                            </button>
+                        );
+                    }
+
+                    return (
+                        <button
+                            onClick={handleSwap}
+                            disabled={!!(!fromToken || !toToken || !quote || isSwapping || loadingQuote || hasInsufficientBalance)}
+                            className={`w-full text-white text-lg font-bold py-4 rounded-2xl mt-2 transition-all active:scale-[0.98] relative z-10 flex items-center justify-center gap-2 ${hasInsufficientBalance ? 'bg-red-500/50 cursor-not-allowed' : 'bg-primary hover:bg-primary/90 disabled:bg-primary/50 disabled:cursor-not-allowed'}`}
+                        >
+                            {loadingQuote ? (
+                                <Loader2 className="w-6 h-6 animate-spin" />
+                            ) : isSwapping ? (
+                                <Loader2 className="w-6 h-6 animate-spin" />
+                            ) : !fromToken || !toToken ? (
+                                'Select Tokens'
+                            ) : !quote ? (
+                                'Enter Amount'
+                            ) : hasInsufficientBalance ? (
+                                'Insufficient Balance'
+                            ) : (
+                                'Swap'
+                            )}
+                        </button>
+                    );
+                })()}
             </div>
 
             {/* Token Modal */}
@@ -959,8 +1153,21 @@ export default function SwapWidget() {
                                             key={t.identifier}
                                             className="w-full flex items-center gap-4 p-3 hover:bg-white/5 rounded-xl transition-colors text-left"
                                             onClick={() => {
-                                                if (modalOpen === 'from') setFromToken(t);
-                                                else setToToken(t);
+                                                if (modalOpen === 'from') {
+                                                    setFromToken(t);
+                                                    if (!getAddressForChain(t.chain)) {
+                                                        // Auto-connect if not connected
+                                                        if (isEVM(t.chain)) openConnectKit(true);
+                                                        else connectCrossChainWallet(t.chain);
+                                                    }
+                                                } else {
+                                                    setToToken(t);
+                                                    if (!getAddressForChain(t.chain) && t.chain !== fromToken?.chain) {
+                                                        // Auto-connect if not connected
+                                                        if (isEVM(t.chain)) openConnectKit(true);
+                                                        else connectCrossChainWallet(t.chain);
+                                                    }
+                                                }
                                                 setModalOpen(null);
                                                 setSearchQuery('');
                                             }}

@@ -1,6 +1,37 @@
 import SwapWidget from './components/SwapWidget';
 import { Web3Provider } from './components/Web3Provider';
 import { ConnectKitButton } from 'connectkit';
+import { useAccount } from 'wagmi';
+import { useWallet } from '@tronweb3/tronwallet-adapter-react-hooks';
+
+function ConnectedNetwork() {
+  const { chain, isConnected: isEvmConnected } = useAccount();
+  const { connected: isTronConnected, address: tronAddress } = useWallet();
+
+  const isTronActive = isTronConnected && !!tronAddress;
+
+  if (!isEvmConnected && !isTronActive) {
+    return (
+      <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10 opacity-50">
+        <div className="w-2 h-2 rounded-full bg-white/20" />
+        <span className="text-xs font-medium text-white/40">No Wallet Connected</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="hidden md:flex flex-col items-end gap-1">
+      <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-green-500/10 border border-green-500/20">
+        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+        <span className="text-xs font-medium text-green-400">
+          {isEvmConnected ? (chain?.name || 'EVM Connected') : ''}
+          {isEvmConnected && isTronActive ? ' & ' : ''}
+          {isTronActive ? 'TRON Network' : ''}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 
 function App() {
@@ -15,7 +46,8 @@ function App() {
           <div className="flex items-center gap-2">
             {/* <span className="font-bold text-xl tracking-tight">M5Dex</span> */}
           </div>
-          <div>
+          <div className="flex items-center gap-4">
+            <ConnectedNetwork />
             <ConnectKitButton />
           </div>
         </header>
